@@ -1,0 +1,1 @@
+{0 ("if (!elements.mainVideo.paused)\n{\n     elements.mainVideo.pause();\n     elements.narratorVideo.style.display = \"inline\";\n     elements.narratorDiv.style.display = \"inline\";\n     elements.narratorVideo.className = \"expanded\";\n     elements.narratorVideo.play();\n}\n")}
