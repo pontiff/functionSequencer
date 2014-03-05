@@ -33,33 +33,49 @@
 
  (defn getStateRef [ stateMap frameNum ]
   (first (for [[k v] @stateMap :when (not (empty? (filter #(= % frameNum) (v :frameRefs)))) ]
-    k)))
-
-
- (defn removeElementFromFrame [timeLine frameNo element] ; DO NOT USE, CAN REMOVE OTHER ELEMENTS if LINKED WITH TARGET ELEMENT
-    (remove
-       #(re-find
-         (re-pattern (str "(?<![\\w])" element "(?![\\w])")) %) (timeLine frameNo)))
+           k)))
+ 
+ (defn getKeyFrameRef [ stateMap frameNum ]
+   (first (for [[k v] @stateMap :when (= (v :keyFrame) frameNum) ] k)))
  
  (defn timeline->jsArrayFile [ timeline stateMap targetFile attachTo arrNm ]
    (let [arrStr (str attachTo "." arrNm) ]
      (spit targetFile (str arrStr " = [];\n\n"))
      (doseq [ [ k v ] @timeline]
-       (let [stateRef (getStateRef stateMap k) ]
-       (spit targetFile
-             (str
-              arrStr "[" k "]" " = function(){\n"
-              "if ("attachTo".state != "stateRef")\n{\n"
-              attachTo".takeDowns["attachTo".state]();\n"
-              attachTo".setups["stateRef"]();\n}\n"
-              (apply str (interpose "\n" v))
-              attachTo".state = "stateRef";\n}\n\n")
-             :append true)))))
- 
- (defn stateMap->jsArrayFile [ stateMap takeDownsFile setupsFile attachTo ]
+       (let [stateRef (getStateRef stateMap k)
+             keyRef (getKeyFrameRef stateMap k) ]
+       (cond  
+          stateRef
+          (do  
+            (spit targetFile
+               (str
+                 arrStr "[" k "]" " = function(){\n"
+                 "if ("attachTo".state != "stateRef")\n{\n"
+                 attachTo".takeDowns["attachTo".state]();\n"
+                 attachTo".setups["stateRef"]();\n"
+                 attachTo".state = " stateRef ";\n}\n"
+                 (apply str (interpose "\n" v))
+                 attachTo".state = "stateRef";\n}\n\n")
+               :append true))
+          keyRef
+           (do
+             (spit targetFile
+                (str
+                  arrStr "[" k "]" " = function(){\n"
+                  "if ("attachTo".state != " keyRef ")\n{\n"
+                  attachTo".takeDowns["attachTo".state]();\n"
+                 (apply str (interpose "\n" v))"\n"
+                 attachTo".state = " keyRef ";\n}}\n\n")
+               :append true)))))))
+
+  (defn stateMap->jsArrayFile [ stateMap takeDownsFile setupsFile attachTo ]
   (let [takeArr  (str attachTo ".takeDowns") 
         stateArr (str attachTo ".setups") ]
-   (spit takeDownsFile (str takeArr " = [];\n\n"))
+    (spit takeDownsFile
+          (str
+           takeArr " = [];\n\n"
+           takeArr"[0] = function(){\n"
+           attachTo ".state = 0;\n}\n\n"))
    (spit setupsFile (str stateArr " = [];\n\n"))
    (doseq [[k v] stateMap]
      (spit takeDownsFile
@@ -75,10 +91,6 @@
               "\n}\n\n")
            :append true))))
 
- (stateMap->jsArrayFile @STATEMAP "/home/user/code/svg-lab/pub/js/mainVideo/takeDowns.js"
-                                      "/home/user/code/svg-lab/pub/js/mainVideo/setups.js"
-                                      "elements.mainVideo")
-    
  
  (defn getFramesOfElement [ eName timeLine ]
   (for [ [k v] timeLine
@@ -90,10 +102,12 @@
            #(re-find
              (re-pattern (str "(?<![\\w])" eName "(?![\\w])")) %) v ))))
 
- (defn createElementsMap [ sourceFile classNameKey ]
-   (let [ sourceMap (html/select (html/html-resource (java.io.File. sourceFile)) [(keyword (str "."classNameKey))]) ]
-    (for [ x sourceMap ] ((x :attrs):id))))
-
+(defn createElementsMap [ sourceFiles classNameKey ]
+   (let [ sourceRefs
+         (for [ x sourceFiles ]
+           (html/select (html/html-resource (java.io.File. x)) [(keyword (str "."classNameKey))])) ]
+     (apply concat (for [ y sourceRefs ] (for [ x y ] ((x :attrs):id))))))
+ 
  (defn createElementsFile [ targetFile sourceFile classNameVector ]
    (if (.exists (as-file targetFile)) nil (spit targetFile  ""))
    (doseq [ v classNameVector ]
@@ -121,40 +135,56 @@
       (spit filePath {})
       (into (sorted-map) (read-string (slurp filePath))))))
   
- (defn addToStateMap [ stateMap stateFile indx newState newTakeDown frameRef]
-   (let [ frameRefVal (if (@stateMap indx)
-                        (concat ((@stateMap indx):frameRefs) (list frameRef))
-                        (list frameRef))
-          newMap (into (sorted-map) 
+(defn addFramesToState [ stateMap stateFile indx newState newTakeDown frameRange]
+   (let [  newMap (into (sorted-map) 
+                  (assoc @stateMap indx
+                                      {
+                                       :state newState
+                                       :keyFrame ((@stateMap indx):keyFrame)
+                                       :takeDown newTakeDown
+                                       :frameRefs (list* frameRange)})) ]
+    (reset! stateMap newMap)
+    (spit stateFile @stateMap)))
+
+
+ (defn addStateToMap [ stateMap stateFile indx newState newTakeDown keyFrame]
+   (let [  newMap (into (sorted-map) 
                   (assoc @stateMap indx
                                       {
                                        :state newState
                                        :takeDown newTakeDown
-                                       :frameRefs frameRefVal})) ]
-    (reset! stateMap newMap)
-    (spit stateFile @stateMap)))
-
- (defn removeFromStateMap [ stateMap stateFile indx frameRef ]
-   (let [ newFrameRefs (remove #(= % frameRef) ((@stateMap indx):frameRefs))
-          newMap
-             (if (empty? newFrameRefs)
-               (into (sorted-map) (dissoc @stateMap indx))
-               (into (sorted-map) (assoc @stateMap indx
-                                         (assoc (@stateMap indx) :frameRefs newFrameRefs)))) ]
+                                       :keyFrame keyFrame
+                                       :frameRefs '()})) ]
     (reset! stateMap newMap)
     (spit stateFile @stateMap)))
 
 
- (defn repackMap [ targetMap targetFile ]
-   (let [ newMap (into (sorted-map) (zipmap (range (count @targetMap)) (vals @targetMap))) ]
-     (reset! targetMap newMap)
-     (spit targetFile @targetMap)))
+
+ (defn removeFromStateMap [ stateMap stateFile indx ]
+   (let [ newMap (into (sorted-map) (dissoc @stateMap indx))  ]
+    (reset! stateMap newMap)
+    (spit stateFile @stateMap)))
  
 (comment
- 
+
+ (defn switch2test []
+   (def TIMELINE-FILE "pub/test.clj")
+   (def ELEMENTS (createElementsMap ["/home/user/code/svg-lab/pub/index.html"] "mainVidAnim"))
+   (def TIMELINE-MAP (atom (getTimeline TIMELINE-FILE ) ))
+   (def STATEMAP-FILE "pub/testStateMap.clj")
+   (def STATEMAP (atom (getStateMap STATEMAP-FILE)))
+   (defn writeJS []
+     (timeline->jsArrayFile TIMELINE-MAP STATEMAP "pub/testTimeline.js" "elements.mainVideo" "timeline")
+     (stateMap->jsArrayFile @STATEMAP "pub/testTakeDowns.js"
+                                      "pub/testSetups.js"
+                                      "elements.mainVideo")
+     )) (switch2test) (writeJS)
+
+
+  
  (defn switch2main []
    (def TIMELINE-FILE "pub/tMain.clj")
-   (def ELEMENTS (createElementsMap "/home/user/code/svg-lab/pub/index.html" "mainVidAnim"))
+   (def ELEMENTS (createElementsMap ["/home/user/code/svg-lab/pub/index.html"] "mainVidAnim"))
    (def TIMELINE-MAP (atom (getTimeline TIMELINE-FILE ) ))
    (def STATEMAP-FILE "pub/mainStateMap.clj")
    (def STATEMAP (atom (getStateMap STATEMAP-FILE)))
@@ -167,17 +197,27 @@
 
  (defn switch2narrator []
    (def TIMELINE-FILE "pub/tNarrator.clj")
-   (def ELEMENTS (createElementsMap "/home/user/code/svg-lab/pub/index.html" "narratorVidAnim"))
+   (def ELEMENTS (createElementsMap
+                  ["/home/user/code/svg-lab/pub/index.html" "/home/user/code/svg-lab/pub/svg/narrator.svg"]
+                  "narratorVidAnim"))
    (def TIMELINE-MAP (atom (getTimeline TIMELINE-FILE)))
+   (def STATEMAP-FILE "pub/narratorStateMap.clj")
+   (def STATEMAP (atom (getStateMap STATEMAP-FILE)))
+
    (defn writeJS []
-    (timeline->jsArrayFile @TIMELINE-MAP "/home/user/code/svg-lab/pub/js/timelines/narrator.js" "elements.narratorVideo" "timeline")))
- 
- (createElementsFile "/home/user/code/svg-lab/pub/js/elements.js" "/home/user/code/svg-lab/pub/index.html" ["mainVidAnim"])
+    (timeline->jsArrayFile TIMELINE-MAP STATEMAP "/home/user/code/svg-lab/pub/js/narratorVideo/timeline.js" "elements.narratorVideo" "timeline")
+    (stateMap->jsArrayFile @STATEMAP "/home/user/code/svg-lab/pub/js/narratorVideo/takeDowns.js"
+                                      "/home/user/code/svg-lab/pub/js/narratorVideo/setups.js"
+                                      "elements.narratorVideo")))
+    
 
- )
+(createElementsFile "/home/user/code/svg-lab/pub/js/elements.js" "/home/user/code/svg-lab/pub/index.html" ["mainVidAnim"])
 
 
-)(init) 
+)
+
+
+) (init) 
 
 
 ;;;;;;ELEMENTS->FRAMES->CODE PANEL
@@ -232,6 +272,7 @@
 
 (defn initFC []
 
+ (def gap [:fill-h 5])
  (def fclb1 (listbox :model (list* "M" (keys @STATEMAP)) :layout-orientation :horizontal-wrap :fixed-cell-height 20))
    (.setVisibleRowCount fclb1 1)
    (.setFixedCellWidth fclb1 40)
@@ -249,29 +290,31 @@
  (def fcarea2 (text :multi-line? true  ))
  (def fcarea3 (text :multi-line? true  ))
 
+ (def fcarea4 (text :multi-line? false :editable?  true )) 
+ (def fcarea5 (text :multi-line? false :editable?  true ))
+ (config! fcarea4 :size [50 :by 25])
+ (config! fcarea5 :size [50 :by 25])
+ 
  (def fcsplit1 (top-bottom-split (scrollable fcarea2) (scrollable fclb1)))
  (def fcsplit2 (left-right-split (scrollable fcarea1) fcsplit1))
  (def fcsplit3 (left-right-split fcsplit2 (scrollable fcarea3)))
  (def fcsplit4 (top-bottom-split fcsplit3 (scrollable fclb2)))
 
  (def fcbp1 (border-panel
-         :north (horizontal-panel :items [fcb1 fcb2])
+         :north (horizontal-panel :items [fcb1 gap fcb2 gap fcarea4 gap fcarea5])
          :center fcsplit4
          :vgap 5 :hgap 5 :border 5))
 
- (def fcf (frame :minimum-size [200 :by 150] :size [200 :by 150] :title "Javscript Animator"))
+ (def fcf (frame :minimum-size [200 :by 150] :content fcbp1 :size [200 :by 150] :title "Javscript Animator"))
  (-> fcf pack! show!)
-
- (display fcf fcbp1)
-
 
  (listen fcb1 :action
       (fn [e] 
         (if (not (number? (selection fclb1)))
           (let [ newIdx (Integer. (.getSize (.getModel fclb1)))
-                 mapUpdate  (list (value fcarea2)) ]
+                 mapUpdate  (list (value fcarea2) ) ]
 
-            (addToStateMap STATEMAP STATEMAP-FILE
+            (addStateToMap STATEMAP STATEMAP-FILE
                           newIdx          
                           (value fcarea1)
                           (value fcarea3)
@@ -279,50 +322,67 @@
             
             (config! fclb1 :model (list* "M" (keys @STATEMAP)))
             (selection! fclb1 newIdx)
+            
             (updateTimeline
                  TIMELINE-MAP
                  TIMELINE-FILE
                  (Integer. (selection fclb2))
-                 mapUpdate)
+                  mapUpdate)
             (selection! fclb1 newIdx))
           
-          (let [ mapUpdate  (with-meta (list (value fcarea2)) {:statusVal (Integer. (selection fclb1))}) ]
+          (let [ mapUpdate  (list (value fcarea2)) ]
 
-            (addToStateMap STATEMAP STATEMAP-FILE
+            (if (and (re-find #"\d+" (value fcarea4))
+                     (re-find #"\d+" (value fcarea5)))
+              (do
+                (addFramesToState  STATEMAP STATEMAP-FILE
                           (Integer. (selection fclb1))          
                           (value fcarea1)
                           (value fcarea3)
-                          (Integer. (selection fclb2)))
+                          (range (Integer. (value fcarea4)) (+ 1 (Integer. (value fcarea5)))))
             
-               (updateTimeline
-                 TIMELINE-MAP
-                 TIMELINE-FILE
-                 (Integer. (selection fclb2))
-                 mapUpdate)))))
- 
-  (listen fcb2 :action
+                (updateTimeline
+                   TIMELINE-MAP
+                   TIMELINE-FILE
+                   (Integer. (selection fclb2))
+                    mapUpdate)))))))
+
+ (listen fcb2 :action
       (fn [e] 
         (if (= (selection fclb1) "M") nil
            (do
              (removeFromStateMap STATEMAP STATEMAP-FILE
-                                 (Integer. (selection fclb1))
-                                 (Integer. (selection fclb2)))
+                                 (Integer. (selection fclb1)))
             (config! fclb1 :model (list* "M" (keys @STATEMAP)))
             (selection! fclb1 "M")))))
 
-  
  (listen fclb2 :selection
          (fn [e]
            (if (selection e) 
              (do   
                (let [ state (getStateRef STATEMAP (Integer. (selection fclb2)))
-                     
-                     contents (getFrameContents TIMELINE-MAP (int (selection fclb2))) ]
-                 (if state (selection! fclb1 state) (selection! fclb1 "M"))
+                      keyframe (getKeyFrameRef STATEMAP (Integer. (selection fclb2)))
+                      contents (getFrameContents TIMELINE-MAP (int (selection fclb2))) ]
+
+                (cond
+                  state
+                   (do  
+                     (selection! fclb1 state)
+                     (value! fcarea4 (first ((@STATEMAP (getStateRef STATEMAP (int (selection fclb2)))):frameRefs)))
+                     (value! fcarea5 (last ((@STATEMAP (getStateRef STATEMAP (int (selection fclb2)))):frameRefs))))
+                  keyframe
+                   (do
+                     (selection! fclb1 keyframe)
+                     (value! fcarea4 "")
+                     (value! fcarea5 ""))
+                  :else
+                   (do
+                     (selection! fclb1 "M")
+                     (.setText fcarea4 "")
+                     (.setText fcarea5 "")))
                  (if contents
                    (.setText fcarea2 contents)
                    (.setText fcarea2 "")))))))
-
  
  (listen fclb1 :selection
         (fn [e]
@@ -419,5 +479,6 @@
 (initFC)
 (initNCF)
 (switch2main)
+(writeJS)
 
 
